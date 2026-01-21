@@ -3,47 +3,7 @@ const Allocator = std.mem.Allocator;
 
 const requezt = @import("requezt");
 
-fn Args(comptime schema: type, comptime operation: []const u8) type {
-    return @field(schema.Query, operation).Args;
-}
-
-fn contains(haystack: []const []const u8, needle: [:0]const u8) bool {
-    for (haystack) |item| {
-        if (std.mem.eql(u8, item, needle)) return true;
-    }
-
-    return false;
-}
-
-fn Select(comptime T: type, comptime fields: []const []const u8) type {
-    const info = @typeInfo(T).@"struct";
-
-    var copy = info;
-    copy.decls = &.{};
-    copy.fields = &.{};
-
-    for (info.fields) |field| {
-        if (contains(fields, field.name)) {
-            copy.fields = copy.fields ++ &[_]std.builtin.Type.StructField{field};
-        }
-    }
-
-    return @Type(.{ .@"struct" = copy });
-}
-
-fn Return(comptime schema: type, comptime operation: []const u8, comptime fields: []const []const u8) type {
-    const R = @field(schema.Query, operation).Return;
-
-    switch (@typeInfo(R)) {
-        .optional => |optional| return ?Select(optional.child, fields),
-        .pointer => |pointer| {
-            if (pointer.size != .slice or !pointer.is_const) @compileError("unsupported type: " ++ @typeName(R));
-            return []const Select(pointer.child, fields);
-        },
-        .@"struct" => return Select(R, fields),
-        else => @compileError("unsupported type: " ++ @typeName(R)),
-    }
-}
+const meta = @import("meta.zig");
 
 fn hasData(comptime T: type, value: T) bool {
     switch (@typeInfo(T)) {
@@ -87,82 +47,37 @@ fn writeArg(comptime T: type, writer: *std.Io.Writer, name: ?[]const u8, value: 
     }
 }
 
-fn GraphQLResponse(comptime schema: type, comptime operation: [:0]const u8, fields: []const []const u8) type {
-    const ReturnValue = Return(schema, operation, fields);
+fn printFields(comptime T: type, writer: *std.Io.Writer, name: ?[]const u8, value: T) !bool {
+    var bracket_printed = false;
 
-    const Data = @Type(.{
-        .@"struct" = .{
-            .decls = &.{},
-            .fields = &.{
-                .{
-                    .name = operation,
-                    .type = ReturnValue,
-                    .default_value_ptr = null,
-                    .is_comptime = false,
-                    .alignment = @alignOf(ReturnValue),
-                },
+    inline for (@typeInfo(T).@"struct".fields) |field| {
+        const field_value = @field(value, field.name);
+
+        switch (@typeInfo(field.type)) {
+            .@"struct" => {
+                if (try printFields(field.type, writer, field.name, field_value)) {
+                    try writer.print(", ", .{});
+                    bracket_printed = true;
+                }
             },
-            .is_tuple = false,
-            .layout = .auto,
-        },
-    });
+            .bool => {
+                if (field_value) {
+                    if (!bracket_printed) {
+                        if (name) |n| try writer.print("{s} ", .{n});
+                        try writer.print("{{", .{});
+                        bracket_printed = true;
+                    }
 
-    return union(enum) {
-        const Self = @This();
-
-        ok: std.json.Parsed(Success),
-        err: std.json.Parsed(Errors),
-
-        const Success = struct {
-            data: Data,
-        };
-
-        const Error = struct {
-            message: []const u8,
-            locations: []const Location,
-            path: []const []const u8,
-
-            const Location = struct {
-                line: usize,
-                column: usize,
-            };
-        };
-
-        const Errors = struct {
-            errors: []const Error,
-        };
-
-        fn from(allocator: Allocator, slice: []const u8) !Self {
-            const options: std.json.ParseOptions = .{
-                .allocate = .alloc_always,
-                .ignore_unknown_fields = true,
-            };
-
-            const data = std.json.parseFromSlice(Success, allocator, slice, options) catch {
-                const errors = std.json.parseFromSlice(Errors, allocator, slice, options) catch |e| {
-                    std.log.err("{s}", .{slice});
-                    return e;
-                };
-                return .{ .err = errors };
-            };
-
-            return .{ .ok = data };
+                    try writer.print(" {s},", .{field.name});
+                }
+            },
+            else => @compileError("unsupported type: " ++ @typeName(field.type)),
         }
+    }
 
-        pub fn unwrap(self: Self) !ReturnValue {
-            return switch (self) {
-                .ok => |ok| @field(ok.value.data, operation),
-                .err => error.UnwrapOnError,
-            };
-        }
+    if (bracket_printed) try writer.print("}}", .{});
 
-        pub fn deinit(self: Self) void {
-            switch (self) {
-                .ok => |data| data.deinit(),
-                .err => |errors| errors.deinit(),
-            }
-        }
-    };
+    return bracket_printed;
 }
 
 pub fn Client(comptime url: []const u8, comptime schema: type) type {
@@ -170,9 +85,9 @@ pub fn Client(comptime url: []const u8, comptime schema: type) type {
         pub fn execute(
             allocator: Allocator,
             comptime operation: [:0]const u8,
-            args: Args(schema, operation),
-            comptime fields: []const []const u8,
-        ) !GraphQLResponse(schema, operation, fields) {
+            args: @field(schema.Query, operation).Args,
+            comptime fields: meta.Flags(@field(schema.Query, operation).Return),
+        ) !meta.GraphQLResponse(@field(schema.Query, operation).Return, operation, fields) {
             var client: requezt.Client = .init(allocator, .{});
             defer client.deinit();
 
@@ -189,11 +104,7 @@ pub fn Client(comptime url: []const u8, comptime schema: type) type {
                 try writer.print(")", .{});
             }
 
-            try writer.print("{{", .{});
-            for (fields) |field| {
-                try writer.print("{s},", .{field});
-            }
-            try writer.print("}}", .{});
+            _ = try printFields(@TypeOf(fields), writer, null, fields);
 
             try writer.print("}}", .{});
 

@@ -5,7 +5,7 @@
 const std = @import("std");
 const assert = std.debug.assert;
 
-const Parser = @import("gqlz").SchemaParser;
+const Parser = @import("graphqlz").SchemaParser;
 
 fn preamble(writer: *std.Io.Writer) !void {
     try writer.print(
@@ -41,10 +41,14 @@ fn toZig(typ: Parser.T, writer: *std.Io.Writer, options: ToZigOptions) !void {
         },
 
         .list => |list| {
+            if (!list.required) {
+                try writer.print("?", .{});
+            }
+
             try writer.print("[]const {s}", .{list.child.name});
 
             if (!list.required and options.print_default) {
-                try writer.print(" = &.{{}}", .{});
+                try writer.print(" = null", .{});
             }
         },
     }
