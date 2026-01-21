@@ -5,18 +5,6 @@ fn err(comptime T: type) noreturn {
     @compileError("unsupported type: " ++ @typeName(T));
 }
 
-fn WrapReturn(comptime T: type, comptime flags: Flags(T)) type {
-    switch (@typeInfo(T)) {
-        .optional => |optional| return ?Subset(optional.child, flags),
-        .pointer => |pointer| {
-            if (pointer.size != .slice or !pointer.is_const or pointer.sentinel() != null) err(T);
-            return []const Subset(pointer.child, flags);
-        },
-        .@"struct" => return Subset(T, flags),
-        else => err(T),
-    }
-}
-
 fn GetInner(comptime T: type) type {
     return switch (@typeInfo(T)) {
         .array => unreachable,
@@ -217,7 +205,7 @@ const GraphQLErrors = struct {
 };
 
 pub fn GraphQLResponse(comptime T: type, comptime operation: [:0]const u8, comptime fields: Flags(T)) type {
-    const Out = WrapReturn(T, fields);
+    const Out = Subset(T, fields);
 
     const Data = @Type(.{
         .@"struct" = .{
